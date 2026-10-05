@@ -1,0 +1,85 @@
+name: Build, test and push Docker image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: capermint_animation:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container
+        run: docker run -d --name app -p 8080:80 capermint_animation:test
+
+      - name: Check files are served
+        run: |
+          for i in $(seq 1 15); do curl -fs http://localhost:8080/ >/dev/null && break; sleep 1; done
+          for p in \
+            / \
+            Build/IndicWeb-v3.4.3.loader.js \
+            Build/IndicWeb-v3.4.3.framework.js \
+            Build/IndicWeb-v3.4.3.data \
+            Build/IndicWeb-v3.4.3.wasm; do
+            curl -fsS -o /dev/null -w "$p -> %{http_code} %{content_type}\n" "http://localhost:8080/$p"
+          done
+          curl -fsSI http://localhost:8080/Build/IndicWeb-v3.4.3.wasm | grep -qi '^content-type: application/wasm' \
+            || { echo "wasm served with wrong Content-Type"; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: docker logs app || true
+
+  publish:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/capermint_animation
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
